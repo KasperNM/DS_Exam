@@ -1,0 +1,462 @@
+---
+title: "Data_Science_Exam"
+author: "Kasper"
+date: "2023-05-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Installing and loading relevant packages
+```{r}
+install.packages("pacman")
+pacman::p_load(tidyverse, BiocManager, DBI, dplyr, tsibble, feasts, fpp3, RSQLite)
+```
+
+#Loading in the data from the database (uncomment if the sqlite database is in the working directory)
+```{r}
+#The data base can be accessed through this link: https://www.kaggle.com/datasets/hugomathien/soccer
+# con <- dbConnect(SQLite(), dbname="database.sqlite")
+# 
+# #Extracting the data from the sqlite data format
+# #Match data from 11 different European contries
+# matches_df <- dbReadTable(con, "Match")
+# 
+# #Index of teams and their corresponding team_ID - this is used to link the IDs in the match dataframe to actual team names
+# team_df <- dbReadTable(con, "Team")
+# 
+# #League index (Not used for the analysis)
+# league_df <- dbReadTable(con, "League")
+# 
+# #Player index (not used for the analysis)
+# player_df <- dbReadTable(con, "Player")
+# 
+# #Attribute index (not used for the analysis)
+# attributes_df <- dbReadTable(con, "Team_Attributes")
+# 
+# #Creating CSV-files for the Exam-repo
+# write.csv(matches_df, file = "matches.csv")
+```
+
+#extracting all Tottenham Hotspur (Spurs) matches from the 'matches_df'
+```{r}
+#Creating a data frame with all of Spurs' matches (Spurs has the team ID of 8586)
+# spurs_df <- matches_df[matches_df$home_team_api_id == 8586 | matches_df$away_team_api_id == 8586, ]
+# write.csv(spurs_df, file = "spurs_raw.csv")
+#write.csv(team_df, file = "team_df.csv")
+
+#Loading in the datasets used for the exam (the code above requires the full database)
+team_df <- read_csv("team_df.csv")
+spurs_df <- read_csv("spurs_raw.csv")
+#Creating two new columns, number of goals scored by Spurs for every match and the difference between goals scored and goals conceded.
+spurs_df$spurs_goals <- 0
+spurs_df$goaldiff <- 0
+
+for (i in 1:nrow(spurs_df)){
+  #If Spurs is the home team ID = put the home_team_goal column as the spurs_goals column.
+  #If spurs is the home team ID = put the difference between home and away team goals in the goaldiff column.
+  if (spurs_df$home_team_api_id[i] == 8586){
+    spurs_df$spurs_goals[i] <- spurs_df$home_team_goal[i]
+    spurs_df$goaldiff[i] <- spurs_df$home_team_goal[i]-spurs_df$away_team_goal[i]
+  }
+  #Same procedure if Spurs is the away_team
+  else if (spurs_df$away_team_api_id[i] == 8586){
+    spurs_df$spurs_goals[i] <- spurs_df$away_team_goal[i]
+    spurs_df$goaldiff[i] <- spurs_df$away_team_goal[i]-spurs_df$home_team_goal[i] 
+  }
+}
+
+#Creating a variable called gamenumber which is later used as an index when converting the data frame into a timeseries data frame (a tsibble)
+spurs_df$gamenumber <- 1:304
+```
+
+#Further Preprocessing
+```{r}
+#Including only the relevant variables in the data frame 
+spursnewest <- spurs_df %>% select(id, league_id, season, stage, date, match_api_id, home_team_api_id, away_team_api_id, home_team_goal, away_team_goal, spurs_goals, goaldiff, gamenumber)
+
+#Coding the 'home' variable which is a dummy variable of zeros and ones
+spursnewest$home <- 0
+for (i in 1:nrow(spursnewest)){
+  #If spurs is coded as the home_team_id = put a 1 in the column, else put 0
+  if (spursnewest$home_team_api_id[i] == 8586){
+    spursnewest$home[i] <- 1
+  }
+  else {
+    spursnewest$home[i] <- 0
+  }
+}
+
+#Adding the names of opposing teams
+spursnewest$spurs_opp <- 0
+for (i in 1:nrow(spursnewest)){
+  #If home team ID is not the Spurs_ID, run through the team index data frame and put the corresponding label into the spursnewest data frame
+  if (spursnewest$home_team_api_id[i] != 8586) {
+    for (j in 1:nrow(team_df)){
+      if (spursnewest$home_team_api_id[i]==team_df$team_api_id[j]){
+        spursnewest$spurs_opp[i] <- team_df$team_long_name[j]
+      }
+    }
+  }
+}
+
+#Same procedure but is done on the away_team column
+for (i in 1:nrow(spursnewest)){
+  if (spursnewest$away_team_api_id[i] != 8586) {
+    for (j in 1:nrow(team_df)){
+      if (spursnewest$away_team_api_id[i]==team_df$team_api_id[j]){
+        spursnewest$spurs_opp[i] <- team_df$team_long_name[j]
+      }
+    }
+  }
+}
+
+#Writing the dataframe as a CSV file in order to manually code ratings from the FIFA index into the data frame. The manually coding is done in google sheets.
+write_csv(spursnewest, file = "spurs.csv")
+```
+
+#Loading the edited spurs data frame with ratings from the FIFA index
+```{r}
+#Ratings include overall rating of spurs and the opposing teams at the start of every season, ratings of attacking strength and defensive strength for spurs and the opposing teams.
+edited_spurs <- read_csv("spurs_edit.csv")
+
+##Creating new variables based on the ratings from the FIFA team index
+#The difference between the attack rating of spurs and the opposing teams' defensive rating
+edited_spurs$off_adv <- edited_spurs$spurs_attack - edited_spurs$opp_defense
+
+#The difference between the defensive rating of Spurs and the opposing teams' offensive rating
+edited_spurs$def_adv <- edited_spurs$spurs_def - edited_spurs$opp_attack
+
+#The difference between the overall rating of spurs and the overall rating of the opposing team
+edited_spurs$rate_diff <- edited_spurs$spurs_rating - edited_spurs$opp_rating
+
+#Creating dummy variables for whether spurs won, drew or lost a match.
+edited_spurs$win <- 0
+edited_spurs$draw <- 0
+edited_spurs$loss <- 0
+
+#Using the goal difference column to determine whether Spurs won the match
+for (i in 1:nrow(edited_spurs)){
+  if (edited_spurs$goaldiff[i] > 0){
+    edited_spurs$win[i] <- 1 
+  }
+}
+
+#Same procedure for draws
+for (i in 1:nrow(edited_spurs)){
+  if (edited_spurs$goaldiff[i] == 0){
+    edited_spurs$draw[i] <- 1 
+  }
+}
+
+#Same procedure for losses
+for (i in 1:nrow(edited_spurs)){
+  if (edited_spurs$goaldiff[i] < 0){
+    edited_spurs$loss[i] <- 1 
+  }
+}
+
+#Creating a column for the total amount of goals scored for each match
+edited_spurs$total_goals <- 0
+for (i in 1:nrow(edited_spurs)){
+  edited_spurs$total_goals[i] <- edited_spurs$home_team_goal[i] + edited_spurs$away_team_goal[i]
+}
+
+#Creating a dummy variable that is one if total goals exceeds 2 goals scored.
+edited_spurs$plus_two_goals <- 0
+for (i in 1:nrow(edited_spurs)){
+  #If total goals are above 2 = put 1 in the column
+  if (edited_spurs$total_goals[i] > 2){
+    edited_spurs$plus_two_goals[i] <- 1
+  }
+}
+
+#Creating the form-variable
+edited_spurs$form <- 0
+
+for (i in 1:303){
+  #When a new season starts - reset the form variable to zero
+  if (i==39 || i==77 || i==115 || i==153 || i==191 || i==229 || i==267){
+    edited_spurs$form[i] <- 0
+  #Adding or subtracting values from the form value depending on the outcome. More detail on the form variable can be seen in the variable description in the PDF file.
+  }
+  else if (edited_spurs$win[i]==1 && edited_spurs$rate_diff[i] > 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + 1
+  }
+  else if (edited_spurs$draw[i]==1 && edited_spurs$rate_diff[i] > 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + -1
+  }
+  else if (edited_spurs$loss[i]==1 && edited_spurs$rate_diff[i] > 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + -3
+  }
+  else if (edited_spurs$win[i]==1 && edited_spurs$rate_diff[i] < 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + 3
+  }
+  else if (edited_spurs$loss[i]==1 && edited_spurs$rate_diff[i] < 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + -1
+  }
+  else if (edited_spurs$draw[i]==1 && edited_spurs$rate_diff[i] < 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + 1
+  }
+  else if (edited_spurs$win[i]==1 && edited_spurs$rate_diff[i] == 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + 2
+  }
+  else if (edited_spurs$loss[i]==1 && edited_spurs$rate_diff[i] == 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + -2
+  }
+  else if (edited_spurs$draw[i]==1 && edited_spurs$rate_diff[i] == 0){
+    edited_spurs$form[i+1] <- edited_spurs$form[i] + 0
+  }
+}
+
+#Turn the data frame into a time series table with gamenumber as the index
+edited_spurs <- as_tsibble(edited_spurs, index = gamenumber)
+```
+
+#Preparing for the modeling
+```{r}
+#Seperating the data frame into training and test data
+#Keeping matches for all seasons except the last 19 matches in the 2015/2016 season 
+trainingdata <- edited_spurs %>% slice_head(n = 285)
+#Using these 19 matches as test data to evaluate the model
+future_data <- edited_spurs %>% 
+  slice_tail(n = 19)
+```
+
+#Visual inspection of the data
+```{r}
+#Plotting the timeseries of goal difference in Spurs games with game number as index.
+autoplot(trainingdata, goaldiff)
+
+#plotting the timeseries of total goals scored with game number as index
+autoplot(trainingdata, total_goals)
+
+#Exploratory plotting of goal difference with date as index
+edited_spurs1 <- as_tsibble(edited_spurs, index = date)
+
+#Putting dates between matches to zero in order to be able to plot it
+edited_spurs1 <- tsibble::fill_gaps(edited_spurs1)
+edited_spurs1$goaldiff <- edited_spurs1$goaldiff %>% replace_na(0)
+
+#Plotting goal difference in the games across the year (not included in the report)
+edited_spurs1 %>% 
+  gg_season(goaldiff, period = "year") +
+  labs(y = "goal difference",
+       title = "goaldiff")
+
+#Exploratory plotting of goal difference with date as index
+edited_spurs1 <- tsibble::fill_gaps(edited_spurs1)
+edited_spurs1$total_goals <- edited_spurs1$total_goals %>% replace_na(0)
+
+#Plotting total goals scored in the games across the year (not included in the report)
+edited_spurs1 %>% 
+  gg_season(total_goals, period = "year") +
+  labs(y = "total goals scored",
+       title = "Total goals scored")
+
+#Plotting the auto correlation of the goal difference time series
+edited_spurs %>% ACF(goaldiff, lag_max = 38) %>% 
+  autoplot()
+
+#Plotting the auto-correlation of the total goals time series
+edited_spurs %>% ACF(total_goals, lag_max = 38) %>% 
+  autoplot()
+```
+
+#Estimating models on the training data
+```{r}
+#To find the optimal set of predictors for the forecasting model, predicting goal difference in future spurs games, the glance() function from the fable package used to collect the AIC, BIC, AICc, CV and RSquared scores. 
+
+#Different combinations of the variables: Home = Whether Spurs played at home or away from home, rate_diff = the difference in overall rating between Spurs and the opposing team, and form = a metric describing how the team has performed in previous games.
+m1 <- trainingdata %>% model(lm = TSLM(goaldiff ~ home + rate_diff + form)) %>% glance()
+m2 <- trainingdata %>% model(lm = TSLM(goaldiff ~ home)) %>% glance()
+m3 <- trainingdata %>% model(lm = TSLM(goaldiff ~ home + rate_diff)) %>% glance()
+m4 <- trainingdata %>% model(lm = TSLM(goaldiff ~ form)) %>% glance()
+m5 <- trainingdata %>% model(lm = TSLM(goaldiff ~ rate_diff + form)) %>% glance()
+m6 <- trainingdata %>% model(lm = TSLM(goaldiff ~ rate_diff)) %>% glance()
+
+#The evaluation metrics of the estimated models are stored in the hyp1 dataframe
+hyp1 <- rbind(m1,m2,m3,m4,m5,m6) %>% select(adj_r_squared, CV, AIC, AICc, BIC)
+hyp1$model <- 1:6
+#Model 3 seems to be best, both lowest AICC and CV and highest Rsquared. For the forecasting model to predict goal difference in future spurs games, model 3 is used.
+
+#Defining and estimating the model to evaluate
+m3_forecast <- trainingdata %>% model(lm = TSLM(goaldiff ~ home + rate_diff))
+
+#The model is evaluated by looking at the residuals of the modelfit.
+m3_forecast %>% gg_tsresiduals()
+
+#Same procedure for the second hypothesis. Amount of goals in the game as dependent variable. As independent variables: off_adv = the difference between the attack rating of Spurs and the opposing team's defensive rating, def_adv = the difference between the defense rating of Spurs and the opposing team's attack rating, and form = a metric describing how the team has performed in previous games.
+m7 <- trainingdata %>% model(lm = TSLM(total_goals ~ off_adv + home + form + def_adv)) %>% glance()
+m8 <- trainingdata %>% model(lm = TSLM(total_goals ~ off_adv + def_adv + home)) %>% glance()
+m9 <- trainingdata %>% model(lm = TSLM(total_goals ~ off_adv + home)) %>% glance()
+m10 <- trainingdata %>% model(lm = TSLM(total_goals ~ def_adv + home)) %>% glance() 
+m11 <- trainingdata %>% model(lm = TSLM(total_goals ~ form + home)) %>% glance()
+m12 <- trainingdata %>% model(lm = TSLM(total_goals ~ off_adv + form)) %>% glance()
+m13 <- trainingdata %>% model(lm = TSLM(total_goals ~ def_adv + form)) %>% glance()
+m14 <- trainingdata %>% model(lm = TSLM(total_goals ~ def_adv + home + form)) %>% glance()
+
+#The evaluation metrics of the estimated models are stored in the hyp2 dataframe
+hyp2 <- rbind(m7,m8,m9,m10,m11,m12,m13,m14) %>% select(adj_r_squared, CV, AIC, AICc, BIC)
+hyp2$model <- 7:14
+#Model 10 seems to have the best performance (lowest AICc, AIC and CV values and highest RSquared)
+#This model will be used in the attempt to forecast total goals scored in each of the last 19 games of the 2015/2016 season.
+
+#Defining and estimating the model to evaluate
+m10_forecast <- trainingdata %>% model(lm = TSLM(total_goals ~ def_adv + home))
+
+#The model is evaluated by looking at the residuals of the modelfit.
+m10_forecast %>% gg_tsresiduals()
+```
+
+#Using the best model for each hypothesis to forecast 
+```{r}
+#Forecasting future games (last 19 games of the 2015/2016 season) using the forecast function from the fabletools package
+forecast_m3 <- forecast(m3_forecast, new_data = future_data)
+#Plotting the forecast with the training data
+forecast_m3 %>% autoplot(trainingdata)
+#Plotting the forecast along side the entire data
+forecast_m3 %>% autoplot(edited_spurs)
+#Plotting the forecast along side the actual values
+forecast_m3 %>% autoplot(future_data)
+#Calculating the accuracy of the forecast 
+m3_accuracy <- forecast_m3 %>% accuracy(edited_spurs)
+m3_accuracy
+
+#Forecasting the total number of goals for each match (last 19 games of the 2015/2016 season).
+#Same procedure as in hypothesis 1
+forecast_m10 <- forecast(m10_forecast, new_data = future_data)
+#plotting the forecast with the training data
+forecast_m10 %>% autoplot(trainingdata)
+#Plotting the forecast along side the entire data
+forecast_m10 %>% autoplot(edited_spurs)
+#Plotting the forecast along side the actual values
+forecast_m10 %>% autoplot(future_data)
+#Calculating accuracy
+m10_accuracy <- forecast_m10 %>% accuracy(edited_spurs)
+m10_accuracy
+```
+#Evaluating the forecasts
+```{r}
+#Further evaluation
+#Making a dataframe consisting of the actual goal difference values and the values generated from the forecast
+summarydfm3 <- as.data.frame(cbind(forecast_m3$goaldiff, future_data$goaldiff))
+ok <- summarydfm3$V1[1:19]
+summarydfm3$mean_forecast <- 0
+#forecasts are made as distributions - the mean is extracted to determine a single projected value
+for (i in 1:nrow(future_data)){
+  summarydfm3$mean_forecast[i] <- ok[[i]]$mu
+}
+#Creating a win row from the goal difference column (if Spurs has a positive goaldiff = win)
+summarydfm3$real_win <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$V2[i] > 0){
+    summarydfm3$real_win[i] <- 1
+  }
+}
+
+#Creating a predicted win column from the forecasts (if the predicted value is above 0.5 = win)
+summarydfm3$predicted_win <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$mean_forecast[i] > 0.5){
+    summarydfm3$predicted_win[i] <- 1
+  }
+}
+
+#Creating a column that is put as 1 if the forecast predicted a win which also was a win in reality
+summarydfm3$correct_win <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$real_win[i]==1 && summarydfm3$predicted_win[i]==1){
+    summarydfm3$correct_win[i] <- 1
+  }
+}
+
+#Creating a draw row from the goal difference column (goaldiff is 0 = draw)
+summarydfm3$real_draw <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$V2[i] == 0){
+    summarydfm3$real_draw[i] <- 1
+  }
+}
+#Creating a predicted draw column from the forecasts (if the predicted value is between -0.5 & 0.5 = draw)
+summarydfm3$predicted_draw <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$mean_forecast[i] < 0.5 && summarydfm3$mean_forecast[i] > -0.5){
+    summarydfm3$predicted_draw[i] <- 1
+  }
+}
+
+#Creating a column that is put as 1 if the forecast predicted a draw which also was a draw in reality
+summarydfm3$correct_draw <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$real_draw[i]==1 && summarydfm3$predicted_draw[i]==1){
+    summarydfm3$correct_draw[i] <- 1
+  }
+}
+
+#Creating a loss row from the goal difference column (if Spurs has a negative goaldiff = loss)
+summarydfm3$real_loss <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$V2[i] < 0){
+    summarydfm3$real_loss[i] <- 1
+  }
+}
+#Creating a predicted loss column from the forecasts (if the predicted value is below -0.5 = loss)
+summarydfm3$predicted_loss <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$mean_forecast[i] < -0.5){
+    summarydfm3$predicted_loss[i] <- 1
+  }
+}
+
+#Creating a column that is put as 1 if the forecast predicted a loss which also was a loss in reality
+summarydfm3$correct_loss <- 0
+for (i in 1:nrow(summarydfm3)){
+  if (summarydfm3$real_loss[i]==1 && summarydfm3$predicted_loss[i]==1){
+    summarydfm3$correct_loss[i] <- 1
+  }
+}
+#Creating a summary table - only three out of the ten actual wins were predicted correctly
+#2 draws out of 5 were predicted correctly and 0 out of 4 losses were predicted correctly.
+summarytablem3 <- summarydfm3 %>% summarise(sum(correct_win), sum(real_win), sum(correct_draw), sum(real_draw), sum(correct_loss), sum(real_loss))  
+summarytablem3
+
+#Same procedure for hypothesis 2, creating a data frame of actual and predicted values for total goals scored in each match  
+summarydfm10 <- as.data.frame(cbind(forecast_m10$total_goals, future_data$total_goals))
+ok1 <- summarydfm10$V1[1:19]
+#forecasts are made as distributions - the mean is extracted to determine a single projected value
+summarydfm10$mean_forecast <- 0
+for (i in 1:nrow(future_data)){
+  summarydfm10$mean_forecast[i] <- ok1[[i]]$mu
+}
+
+#Creating a column that is 1 when goals scored is above 2
+summarydfm10$real_above2goals <- 0
+for (i in 1:nrow(summarydfm10)){
+  if (summarydfm10$V2[i]>2){
+    summarydfm10$real_above2goals[i] <- 1
+  }
+}
+
+#Creating a column that 1 when predicted goals are above 2.5 (which means that amounts of goals are closer to three compared to two)
+summarydfm10$predicted_above2goals <- 0
+for (i in 1:nrow(summarydfm10)){
+  if (summarydfm10$mean_forecast[i]>2.5){
+    summarydfm10$predicted_above2goals[i] <- 1
+  }
+}
+
+#Column tracking the correct forecasts
+summarydfm10$correct <- 0
+for (i in 1:nrow(summarydfm10)){
+  if (summarydfm10$real_above2goals[i]==summarydfm10$predicted_above2goals[i]){
+    summarydfm10$correct[i] <- 1
+  }
+}
+
+#13 out of 19 times were the model succesful in predicting whether the total amount of goals in the game was above or below 2.5 goals.
+summarytablem10 <- summarydfm10 %>% summarise(n(), sum(correct))
+summarytablem10
+```
