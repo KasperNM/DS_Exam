@@ -1,5 +1,5 @@
 # Data Science Exam project 2023
-This project includes a main Rmarkdown file "Datascience_full_analysis.Rmd" containing the full analysis of the project "Predicting goals and results in the Premier League from the perspective of Tottenham Hotspur". The report of the project is attached as a PDF.file with the name: "DS_exam_done.pdf"
+This project includes a main Rmarkdown file "Datascience_full_analysis.Rmd" containing the full analysis of the project "Predicting goals and results in the Premier League from the perspective of Tottenham Hotspur". The report of the project is attached as a PDF.file with the name: "DS_exam.pdf"
 
 ## CSV files in the repository
 All of the data in this repository is extracted or preprocessed from a database called "The European soccer database" on Kaggle.com URL: https://www.kaggle.com/datasets/hugomathien/soccer. This database is too large to upload to github, thus the relevant data is gathered in the following CSV files: 
